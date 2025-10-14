@@ -528,22 +528,22 @@ def process_file_scan(chat_id, file_content):
         active_count = 0
         last_update_time = time.time()
         
-        for i, item in enumerate(ips_to_scan):
-            if should_stop(chat_id):
-                try:
-                    bot.delete_message(chat_id, progress_msg.message_id)
-                except:
-                    pass
-                            summary = f"""
+        if should_stop(chat_id):
+            try:
+                bot.delete_message(chat_id, progress_msg.message_id)
+            except:
+                pass
+            success_rate = (active_count / scanned_count * 100) if scanned_count > 0 else 0
+            summary = f"""
 ⏹️ **تم إيقاف الفحص السريع**
 
 📊 **النتائج حتى الآن:**
 • 🔢 تم فحص: {scanned_count}/{total_ips}
 • 🟢 النشطة: {active_count}
-• 📈 نسبة النجاح: {((active_count/scanned_count)*100) if scanned_count > 0 else 0:.1f}%
+• 📈 نسبة النجاح: {success_rate:.1f}%
 """
-                bot.send_message(chat_id, summary)
-                return
+            bot.send_message(chat_id, summary)
+            return active_count
                 
             ip, ports = item['ip'], item['ports']
             is_active = perform_quick_scan(chat_id, ip, ports, f"ملف", show_failures=False)
