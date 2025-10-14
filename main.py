@@ -622,12 +622,12 @@ def process_bulk_quick_scan(chat_id, ip_list):
             except:
                 pass
             summary = f"""
-⏹️ **تم إيقاف الفحص السريع**
+⏹️ **تم إيقاف فحص الملف**
 
 📊 **النتائج حتى الآن:**
 • 🔢 تم فحص: {scanned_count}/{total_ips}
 • 🟢 النشطة: {active_count}
-• 📈 نسبة النجاح: {(active_count/scanned_count)*100:.1f}% إذا كان {scanned_count} > 0 else 0}%
+• 📈 نسبة النجاح: {((active_count/scanned_count)*100) if scanned_count > 0 else 0:.1f}%
 """
             bot.send_message(chat_id, summary)
             return active_count
