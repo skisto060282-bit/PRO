@@ -1,484 +1,280 @@
 import telebot
 import requests
 import socket
-from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
-import logging
-import warnings
+from datetime import datetime
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# إخفاء التحذيرات
-warnings.filterwarnings("ignore")
+# توكن البوت - ضعيه هنا
+bot = telebot.TeleBot("8468502888:AAGZl6YpdMDMenGthyWT_r-5NLaY_cCymGc")
 
-# ---------- إعدادات السكريبت ----------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("ProxyBot")
+# تخزين العمليات الجارية
+active_checks = {}
 
-# إعدادات البوت
-TOKEN = '8468502888:AAGZl6YpdMDMenGthyWT_r-5NLaY_cCymGc'
-bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
-
-# إعدادات الفحص
-criticalASN = 'AS396982'
-defaultPorts = [80, 443, 8080, 3128]
-MAX_IPS_PER_MSG = 300
-HTTP_TIMEOUT = 2
-SCAN_CONCURRENCY = 200
-
-# إدارة العمليات
-user_operations = {}
-waiting_proxy_url = set()
-
-# ---------------- دوال مساعدة ----------------
-def validate_ip(ip):
+def get_ip_info(ip):
+    """جلب معلومات IP متقدمة"""
     try:
-        parts = ip.split('.')
-        if len(parts) != 4: return False
-        for part in parts:
-            if not 0 <= int(part) <= 255: return False
-        return True
-    except: return False
-
-def create_progress_bar(percentage, length=20):
-    filled = int(length * percentage / 100)
-    return "▰" * filled + "▱" * (length - filled)
-
-def calculate_strength(protocols_count, response_time):
-    if protocols_count == 3 and response_time < 1.5: return "قوي 💪"
-    elif protocols_count >= 2 and response_time < 2.5: return "متوسط 🔸"  
-    else: return "ضعيف 🔻"
-
-def query_ip_api(ip):
-    try:
-        r = requests.get(f'http://ip-api.com/json/{ip}?fields=status,country,isp,as,org', timeout=5)
-        data = r.json()
-        return data if data.get('status') == 'success' else None
-    except: return None
-
-# ---------------- دوال الفحص (النسخة المحسنة) ----------------
-def check_http(ip, port):
-    """فحص HTTP - مرن مثل السكربت الأساسي"""
-    try:
-        response = requests.get(
-            f'http://{ip}:{port}',
-            timeout=HTTP_TIMEOUT,
-            headers={'User-Agent': 'Mozilla/5.0'},
-            allow_redirects=True
-        )
-        return response.status_code < 500
-    except: return False
-
-def check_https(ip, port):
-    """فحص HTTPS - مرن مثل السكربت الأساسي"""
-    try:
-        response = requests.get(
-            f'https://{ip}:{port}',
-            timeout=HTTP_TIMEOUT,
-            headers={'User-Agent': 'Mozilla/5.0'},
-            allow_redirects=True,
-            verify=False
-        )
-        return response.status_code < 500
-    except: return False
-
-def check_connect(ip, port):
-    """فحص CONNECT - لـ port 80 فقط"""
-    if port != 80: return False
-    try:
-        sock = socket.create_connection((ip, port), timeout=HTTP_TIMEOUT)
-        sock.send(b"CONNECT www.google.com:443 HTTP/1.1\r\nHost: www.google.com:443\r\n\r\n")
-        response = sock.recv(1024).decode()
-        sock.close()
-        return '200' in response or 'Connection established' in response
-    except: return False
-
-def smart_proxy_scan(ip, port):
-    """الفحص الرئيسي - مرن وفعال مثل الأساسي"""
-    protocols = []
-    start_time = time.time()
-    
-    # فحص HTTP
-    if check_http(ip, port):
-        protocols.append("HTTP")
-    
-    # فحص HTTPS
-    if check_https(ip, port):
-        protocols.append("HTTPS")
-    
-    # فحص CONNECT (لـ port 80 فقط)
-    if check_connect(ip, port):
-        protocols.append("CONNECT")
-    
-    response_time = time.time() - start_time
-    return protocols, response_time
-
-def perform_quick_scan(chat_id, ip, ports=None):
-    """فحص سريع - يعرض كل النتائج الناجحة"""
-    if ports is None: ports = defaultPorts
-    
-    for port in ports:
-        protocols, response_time = smart_proxy_scan(ip, port)
+        response = requests.get(f"http://ip-api.com/json/{ip}", timeout=5)
+        data = response.json()
         
-        if protocols:  # ✅ يعرض إذا وجد أي بروتوكول ناجح
-            ip_data = query_ip_api(ip)
-            country = ip_data.get('country', 'N/A') if ip_data else 'N/A'
-            isp = ip_data.get('isp', 'N/A') if ip_data else 'N/A'
-            
-            # تصنيف القوة
-            strength = calculate_strength(len(protocols), response_time)
-            
-            # إعداد الرسالة
-            as_badge = "🔴" if ip_data and criticalASN in ip_data.get('as', '') else "⚪"
-            
-            result_message = f"""
-📍 **{ip}:{port}**
-💪 **القوة:** {strength}
-🔸 **البروتوكولات:** {' • '.join(protocols)}
-⚡ **الاستجابة:** {response_time:.1f} ثانية
-✅ **مفتوح:** {', '.join(protocols)}
-🏢 **{isp}** {as_badge}
-🌍 **{country}**
-"""
-            bot.send_message(chat_id, result_message, parse_mode="Markdown")
-            
-            # ✅ رسالة تنبيه Google المختصرة
-            if ip_data and criticalASN in ip_data.get('as', ''):
-                google_alert = f"🚨🚨 تنبيه عاجل! وجد بروكسي ضمن ASN المهم جداً {criticalASN} — IP: {ip}"
-                bot.send_message(chat_id, google_alert)
-            
-            return True
-    return False
-
-# ---------------- الفحص الجماعي الذكي ----------------
-def process_bulk_quick_scan(chat_id, ip_list):
-    user_operations[chat_id] = {'stop': False, 'active_proxies': []}
-    
-    total_ips = len(ip_list)
-    scanned_count = 0
-    active_count = 0
-    
-    progress_msg = bot.send_message(chat_id, 
-        f"🔄 **جاري الفحص النشط**\n\n✅ **تم فحص:** 0/{total_ips}\n🟢 **الشغالة:** 0 ✅\n📊 **التقدم:** 0% ▱▱▱▱▱▱▱▱▱▱")
-
-    # فحص متوازي حقيقي
-    with ThreadPoolExecutor(max_workers=SCAN_CONCURRENCY) as executor:
-        futures = []
-        for item in ip_list:
-            if user_operations[chat_id]['stop']:
-                break
-            future = executor.submit(perform_quick_scan, chat_id, item['ip'], item['ports'])
-            futures.append(future)
+        asn = data.get('as', 'غير معروف')
+        isp = data.get('isp', 'غير معروف')
+        country = data.get('country', 'غير معروف')
+        city = data.get('city', 'غير معروف')
         
-        for i, future in enumerate(futures):
-            if user_operations[chat_id]['stop']:
-                break
-                
-            try:
-                is_active = future.result(timeout=10)
-                scanned_count = i + 1
-                if is_active:
-                    active_count += 1
-                
-                # تحديث الشريط كل 10 عمليات
-                if scanned_count % 10 == 0 or scanned_count == total_ips:
-                    percentage = (scanned_count / total_ips) * 100
-                    progress_text = f"""
-🔄 **جاري الفحص النشط**
+        return {
+            'asn': asn,
+            'isp': isp,
+            'country': country,
+            'city': city,
+            'status': data.get('status', 'fail')
+        }
+    except:
+        return None
 
-✅ **تم فحص:** {scanned_count}/{total_ips}
-🟢 **الشغالة:** {active_count} ✅
-📊 **التقدم:** {percentage:.0f}% {create_progress_bar(percentage)}
-"""
-                    try:
-                        bot.edit_message_text(progress_text, chat_id, progress_msg.message_id)
-                    except: pass
-                    
-            except: 
-                scanned_count += 1
-    
-    # النتائج النهائية
-    success_rate = (active_count / scanned_count * 100) if scanned_count > 0 else 0
-    final_message = f"""
-🎉 **الفحص اكتمل!**
-
-📈 **النتائج النهائية:**
-• 🔢 **المفحوصة:** {total_ips} بروكسي
-• 🟢 **الشغالة:** {active_count} ✅
-• 📊 **النجاح:** {success_rate:.1f}% {create_progress_bar(success_rate)}
-"""
-    bot.send_message(chat_id, final_message)
-    
-    if chat_id in user_operations:
-        del user_operations[chat_id]
-
-# ---------------- جلب البروكسيات ----------------
-def fetch_proxies_from_url(url):
+def check_single_proxy(proxy_ip, proxy_port, chat_id):
+    """فحص بروكسي واحد بسرعة 150ms"""
     try:
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            proxies = []
-            for line in r.text.splitlines()[:500]:
-                line = line.strip()
-                if ':' in line and '.' in line:
-                    parts = line.split(':')
-                    if len(parts) >= 2 and validate_ip(parts[0]) and parts[1].isdigit():
-                        proxies.append(f"{parts[0]}:{parts[1]}")
-            return proxies
-    except: return []
-    return []
-
-def process_custom_proxies_scan(chat_id, custom_url):
-    progress_msg = bot.send_message(chat_id, "🔍 **جاري جلب البروكسيات...**")
-    
-    proxies = fetch_proxies_from_url(custom_url)
-    if not proxies:
-        bot.send_message(chat_id, "❌ لم يتم العثور على بروكسيات")
-        return
-    
-    bot.edit_message_text(f"🌐 **تم جلب {len(proxies)} بروكسي**\n🚀 **بدء الفحص...**", 
-                         chat_id, progress_msg.message_id)
-    
-    ip_list = [{'ip': p.split(':')[0], 'ports': [int(p.split(':')[1])]} for p in proxies if ':' in p]
-    process_bulk_quick_scan(chat_id, ip_list)
-
-# ---------------- دوال SSH ----------------
-def get_ssh_account_sync():
-    """استدعاء API جلب SSH"""
-    try:
-        SSH_API_URL = "https://painel.meowssh.shop:5000/test_ssh_public"
-        SSH_PAYLOAD = {"store_owner_id": 1}
-        SSH_HEADERS = {"Accept": "application/json", "Content-Type": "application/json"}
+        # فحص سريع (150ms timeout)
+        proxy_dict = {
+            'http': f"http://{proxy_ip}:{proxy_port}",
+            'https': f"https://{proxy_ip}:{proxy_port}"
+        }
         
-        r = requests.post(SSH_API_URL, json=SSH_PAYLOAD, headers=SSH_HEADERS, timeout=10)
-        if r.status_code in [200, 201]:
-            data = r.json()
-            usuario = data.get("Usuario")
-            senha = data.get("Senha")
-            return f"👤 <b>Usuario:</b> <code>{usuario}</code>\n🔑 <b>Senha:</b> <code>{senha}</code>"
-        else:
-            return f"❌ خطأ {r.status_code}"
+        # فحص HTTP سريع
+        start_time = time.time()
+        try:
+            response = requests.get('http://httpbin.org/ip', 
+                                  proxies=proxy_dict, timeout=0.15)
+            http_working = response.status_code == 200
+            http_speed = int((time.time() - start_time) * 1000)
+        except:
+            http_working = False
+            http_speed = 0
+        
+        # فحص CONNECT سريع
+        connect_working = False
+        connect_speed = 0
+        try:
+            start_time = time.time()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.15)
+            result = sock.connect_ex((proxy_ip, int(proxy_port)))
+            connect_working = result == 0
+            connect_speed = int((time.time() - start_time) * 1000)
+            sock.close()
+        except:
+            pass
+        
+        # جلب معلومات IP
+        ip_info = get_ip_info(proxy_ip)
+        
+        return {
+            'ip': proxy_ip,
+            'port': proxy_port,
+            'http': http_working,
+            'http_speed': http_speed,
+            'connect': connect_working,
+            'connect_speed': connect_speed,
+            'ip_info': ip_info
+        }
+        
     except Exception as e:
-        return f"🚨 خطأ بالاتصال:\n{str(e)}"
+        return None
 
-def handle_ssh_generate(chat_id):
-    """تشغيل استدعاء SSH في Thread"""
-    def job():
-        bot.send_message(chat_id, "🔑 جاري استخراج حساب SSH...")
-        result = get_ssh_account_sync()
-        bot.send_message(chat_id, result)
-        inline_kb = telebot.types.InlineKeyboardMarkup()
-        inline_kb.row(telebot.types.InlineKeyboardButton("🔑 استخراج آخر", callback_data='ssh_generate'))
-        inline_kb.row(telebot.types.InlineKeyboardButton("🔙 رجوع للقائمة", callback_data='back_main'))
-        bot.send_message(chat_id, "🔄 اختر الإجراء التالي:", reply_markup=inline_kb)
-    threading.Thread(target=job, daemon=True).start()
+def get_warning_emoji(isp, asn):
+    """إرجاع إشارات تحذير حسب ISP و ASN"""
+    warning = ""
+    
+    if "Google" in str(isp) or "Google" in str(asn):
+        warning = "🔴🚨"
+    elif "Amazon" in str(isp) or "AWS" in str(asn):
+        warning = "🟡⚠️"
+    elif "Microsoft" in str(isp):
+        warning = "🔵ℹ️"
+    elif any(word in str(isp) for word in ["Cloud", "Host", "Data Center"]):
+        warning = "🟠📡"
+    
+    return warning
 
-# ---------------- أوامر البوت مع الأزرار المحسنة ----------------
-@bot.message_handler(commands=['start'])
-def start_message(message):
-    chat_id = message.chat.id
-    user_operations.pop(chat_id, None)
+def create_main_keyboard():
+    """إنشاء لوحة المفاتيح الرئيسية"""
+    keyboard = InlineKeyboardMarkup(row_width=2)
     
-    welcome_msg = """
-🎯 **بوت الفحص الذكي للبروكسيات**
+    btn1 = InlineKeyboardButton("🔍 فحص النص", callback_data="check_text")
+    btn2 = InlineKeyboardButton("🌐 فحص رابط", callback_data="check_url")
+    btn3 = InlineKeyboardButton("🛑 إيقاف البحث", callback_data="stop_check")
+    
+    keyboard.add(btn1, btn2)
+    keyboard.add(btn3)
+    
+    return keyboard
 
-⚡ **المميزات:**
-• فحص HTTP • HTTPS • CONNECT
-• تصنيف تلقائي للقوة 💪🔸🔻  
-• نتائج سريعة وموثوقة
+@bot.message_handler(commands=['start', 'help'])
+def start_command(message):
+    """عند استخدام /start أو /help"""
+    welcome_text = """
+🛡️ **بوت فحص البروكسيات المتقدم** 🛡️
 
-🎮 **الأزرار:"""
-    
-    # Inline Keyboard محسن
-    keyboard = telebot.types.InlineKeyboardMarkup()
-    
-    # الصف الأول - العمليات الأساسية
-    keyboard.row(
-        telebot.types.InlineKeyboardButton("⚡ فحص سريع", callback_data='fast_scan'),
-        telebot.types.InlineKeyboardButton("🌐 جلب بروكسيات", callback_data='fetch_proxies')
-    )
-    
-    # الصف الثاني - خدمات إضافية
-    keyboard.row(
-        telebot.types.InlineKeyboardButton("🔑 استخراج SSH", callback_data='ssh_generate'),
-        telebot.types.InlineKeyboardButton("📊 إحصائيات", callback_data='stats')
-    )
-    
-    # الصف الثالث - إعدادات ومساعدة
-    keyboard.row(
-        telebot.types.InlineKeyboardButton("⚙️ الإعدادات", callback_data='settings'),
-        telebot.types.InlineKeyboardButton("❓ المساعدة", callback_data='help')
-    )
-    
-    # Reply Keyboard ثابت
-    reply_kb = telebot.types.ReplyKeyboardMarkup(
-        resize_keyboard=True,
-        row_width=3
-    )
-    
-    reply_kb.row(
-        telebot.types.KeyboardButton('/start'),
-        telebot.types.KeyboardButton('/stop'),
-        telebot.types.KeyboardButton('/ssh')
-    )
-    reply_kb.row(
-        telebot.types.KeyboardButton('⚡ فحص سريع'),
-        telebot.types.KeyboardButton('🌐 جلب بروكسيات'),
-        telebot.types.KeyboardButton('🔑 SSH')
-    )
-    
-    bot.send_message(chat_id, welcome_msg, reply_markup=keyboard)
-    bot.send_message(chat_id, "🎯 **أزرار سريعة:**", reply_markup=reply_kb)
+⚡ **سرعة الفحص:** 150ms
+🔍 **أنواع الفحص:** HTTP / CONNECT
+🚨 **كشف مزودي الخدمة:** Google, Amazon, etc
 
-@bot.message_handler(commands=['stop'])
-def stop_message(message):
-    chat_id = message.chat.id
-    if chat_id in user_operations:
-        user_operations[chat_id]['stop'] = True
-        bot.send_message(chat_id, "⏹️ **تم إيقاف الفحص**\n\n📊 **جاري جمع النتائج...**")
-    else:
-        bot.send_message(chat_id, "⚠️ لا توجد عمليات فحص جارية")
-
-@bot.message_handler(commands=['ssh'])
-def ssh_command(message):
-    handle_ssh_generate(message.chat.id)
+🎯 **اختر طريقة الفحص:**
+    """
+    
+    bot.send_message(
+        message.chat.id, 
+        welcome_text,
+        reply_markup=create_main_keyboard(),
+        parse_mode='Markdown'
+    )
 
 @bot.callback_query_handler(func=lambda call: True)
-def callback_query(call):
+def handle_callbacks(call):
+    """معالجة الضغط على الأزرار"""
     chat_id = call.message.chat.id
     
-    if call.data == 'fast_scan':
-        bot.send_message(chat_id,
-            '⚡ **الفحص السريع**\n\n'
-            'أرسل IP أو قائمة IPs:\n\n'
-            '📝 **أمثلة:**\n'
-            '• 194.35.12.45:3128\n'
-            '• 194.35.12.45:80,443\n'
-            '• 194.35.12.45\n\n'
-            '🔍 **سيتم فحص HTTP • HTTPS • CONNECT**')
-            
-    elif call.data == 'fetch_proxies':
-        waiting_proxy_url.add(chat_id)
-        bot.send_message(chat_id,
-            '🌐 **جلب بروكسيات**\n\n'
-            'أرسل رابط قائمة البروكسيات:\n\n'
-            '📝 **مثال:**\n'
-            'https://raw.githubusercontent.com/.../proxy.txt')
-            
-    elif call.data == 'ssh_generate':
-        handle_ssh_generate(chat_id)
+    if call.data == "check_text":
+        msg = bot.send_message(chat_id, "📝 أرسلي IP:Port أو قائمة بروكسيات:\nمثال: `192.168.1.1:8080`\nأو قائمة:\n`192.168.1.1:8080\n192.168.1.2:8080`", parse_mode='Markdown')
+        bot.register_next_step_handler(msg, process_text_check)
         
-    elif call.data == 'stats':
-        # إحصائيات البوت
-        total_scans = sum(len(op.get('active_proxies', [])) for op in user_operations.values())
-        bot.send_message(chat_id,
-            f"📊 **إحصائيات البوت:**\n\n"
-            f"• 🔄 العمليات النشطة: {len(user_operations)}\n"
-            f"• 📈 إجمالي الفحوصات: {total_scans}\n"
-            f"• ⚡ السرعة: {SCAN_CONCURRENCY} فحص/ثانية")
-            
-    elif call.data == 'settings':
-        keyboard = telebot.types.InlineKeyboardMarkup()
-        keyboard.row(
-            telebot.types.InlineKeyboardButton("🔧 تغيير المنافذ", callback_data='change_ports'),
-            telebot.types.InlineKeyboardButton("⏱️ تغيير المهلة", callback_data='change_timeout')
-        )
-        keyboard.row(telebot.types.InlineKeyboardButton("🔙 رجوع", callback_data='back_main'))
+    elif call.data == "check_url":
+        msg = bot.send_message(chat_id, "🔗 أرسلي رابط يحتوي على بروكسيات:\nمثال: `https://example.com/proxies.txt`")
+        bot.register_next_step_handler(msg, process_url_check)
         
-        bot.send_message(chat_id,
-            "⚙️ **الإعدادات:**\n\n"
-            f"• 🚪 المنافذ الافتراضية: {', '.join(map(str, defaultPorts))}\n"
-            f"• ⏱️ مهلة الاتصال: {HTTP_TIMEOUT} ثانية\n"
-            f"• ⚡ الفحص المتوازي: {SCAN_CONCURRENCY}",
-            reply_markup=keyboard)
-            
-    elif call.data == 'help':
-        bot.send_message(chat_id,
-            "❓ **دليل الاستخدام:**\n\n"
-            "• ⚡ **الفحص السريع:** أرسل IP مع أو بدون منفذ\n"
-            "• 🌐 **جلب بروكسيات:** أرسل رابط لقائمة بروكسيات\n"
-            "• 🔑 **SSH:** استخراج حسابات SSH مجانية\n"
-            "• ⏹️ **إيقاف:** /stop لإيقاف الفحص الجاري\n\n"
-            "📖 **للمساعدة الفورية راسل المطور**")
-            
-    elif call.data == 'change_ports':
-        bot.send_message(chat_id,
-            "🔧 **تغيير المنافذ الافتراضية:**\n\n"
-            "أرسل المنافذ الجديدة مفصولة بفاصلة:\n"
-            "مثال: 80,443,8080,3128")
-        # يمكن إضافة منطق حفظ المنافذ
-        
-    elif call.data == 'change_timeout':
-        bot.send_message(chat_id,
-            "⏱️ **تغيير مهلة الاتصال:**\n\n"
-            "أرسل المهلة الجديدة بالثواني (1-10):\n"
-            "مثال: 3")
-        # يمكن إضافة منطق حفظ المهلة
-        
-    elif call.data == 'back_main':
-        start_message(call.message)
-
-@bot.message_handler(func=lambda m: True)
-def handle_message(message):
-    chat_id = message.chat.id
-    text = message.text.strip()
-    
-    # معالجة الأزرار النصية
-    if text == '⚡ فحص سريع':
-        bot.send_message(chat_id,
-            '⚡ **الفحص السريع**\n\n'
-            'أرسل IP أو قائمة IPs:\n\n'
-            '📝 **أمثلة:**\n'
-            '• 194.35.12.45:3128\n'
-            '• 194.35.12.45:80,443\n'
-            '• 194.35.12.45\n\n'
-            '🔍 **سيتم فحص HTTP • HTTPS • CONNECT**')
-            
-    elif text == '🌐 جلب بروكسيات':
-        waiting_proxy_url.add(chat_id)
-        bot.send_message(chat_id,
-            '🌐 **جلب بروكسيات**\n\n'
-            'أرسل رابط قائمة البروكسيات:\n\n'
-            '📝 **مثال:**\n'
-            'https://raw.githubusercontent.com/.../proxy.txt')
-            
-    elif text == '🔑 SSH':
-        handle_ssh_generate(chat_id)
-        
-    elif chat_id in waiting_proxy_url:
-        waiting_proxy_url.discard(chat_id)
-        if text.startswith('http'):
-            process_custom_proxies_scan(chat_id, text)
+    elif call.data == "stop_check":
+        if chat_id in active_checks:
+            active_checks[chat_id] = False
+            bot.send_message(chat_id, "🛑 تم إيقاف البحث بنجاح!")
         else:
-            bot.send_message(chat_id, "❌ الرابط يجب أن يبدأ بـ http أو https")
+            bot.send_message(chat_id, "ℹ️ لا يوجد بحث جاري لإيقافه")
+    
+    elif call.data == "main_menu":
+        start_command(call.message)
+
+def process_text_check(message):
+    """معالجة فحص النص"""
+    chat_id = message.chat.id
+    active_checks[chat_id] = True
+    
+    # تحليل النص المدخل
+    proxies = []
+    for line in message.text.split('\n'):
+        line = line.strip()
+        if ':' in line:
+            parts = line.split(':')
+            if len(parts) >= 2:
+                ip = parts[0]
+                port = parts[1]
+                proxies.append((ip, port))
+    
+    if not proxies:
+        bot.send_message(chat_id, "❌ لم أجد أي بروكسيات صالحة في النص")
         return
     
-    # معالجة IPs
-    ip_list = []
-    for line in text.split('\n'):
-        line = line.strip()
-        if ':' in line and validate_ip(line.split(':')[0]):
-            parts = line.split(':')
-            ip, port_str = parts[0], parts[1]
-            try:
-                ports = [int(p) for p in port_str.split(',')] if ',' in port_str else [int(port_str)]
-                ip_list.append({'ip': ip, 'ports': ports})
-            except: 
-                ip_list.append({'ip': ip, 'ports': defaultPorts})
-        elif validate_ip(line):
-            ip_list.append({'ip': line, 'ports': defaultPorts})
+    bot.send_message(chat_id, f"🔍 بدء فحص {len(proxies)} بروكسي...")
     
-    if ip_list:
-        if len(ip_list) > 1:
-            bot.send_message(chat_id, f"🔍 **بدء فحص {len(ip_list)} IP...**")
-        else:
-            bot.send_message(chat_id, "🔍 **جاري الفحص السريع...**")
-        threading.Thread(target=process_bulk_quick_scan, args=(chat_id, ip_list)).start()
-    else:
-        bot.send_message(chat_id, "❌ لم يتم التعرف على أي IP صالح")
+    # فحص جميع البروكسيات
+    working_proxies = []
+    
+    for ip, port in proxies:
+        if not active_checks.get(chat_id, True):
+            break
+            
+        result = check_single_proxy(ip, port, chat_id)
+        if result and (result['http'] or result['connect']):
+            working_proxies.append(result)
+    
+    # عرض النتائج
+    show_results(chat_id, working_proxies)
 
-# ---------------- التشغيل ----------------
+def process_url_check(message):
+    """معالجة فحص الرابط"""
+    chat_id = message.chat.id
+    active_checks[chat_id] = True
+    
+    try:
+        bot.send_message(chat_id, "⏬ جاري تحميل البروكسيات من الرابط...")
+        
+        # تحميل المحتوى من الرابط
+        response = requests.get(message.text, timeout=10)
+        content = response.text
+        
+        # استخراج البروكسيات
+        proxies = []
+        for line in content.split('\n'):
+            line = line.strip()
+            if ':' in line and '.' in line:
+                parts = line.split(':')
+                if len(parts) >= 2:
+                    ip = parts[0]
+                    port = parts[1]
+                    proxies.append((ip, port))
+        
+        if not proxies:
+            bot.send_message(chat_id, "❌ لم أجد أي بروكسيات في الرابط")
+            return
+        
+        bot.send_message(chat_id, f"🔍 بدء فحص {len(proxies)} بروكسي...")
+        
+        # فحص البروكسيات
+        working_proxies = []
+        
+        for ip, port in proxies:
+            if not active_checks.get(chat_id, True):
+                break
+                
+            result = check_single_proxy(ip, port, chat_id)
+            if result and (result['http'] or result['connect']):
+                working_proxies.append(result)
+        
+        # عرض النتائج
+        show_results(chat_id, working_proxies)
+        
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ خطأ في تحميل الرابط: {str(e)}")
+
+def show_results(chat_id, working_proxies):
+    """عرض البروكسيات الشغالة فقط"""
+    if not working_proxies:
+        bot.send_message(chat_id, "❌ لم أعثر على أي بروكسيات شغالة")
+        return
+    
+    results_text = f"✅ **تم العثور على {len(working_proxies)} بروكسي شغال**\n\n"
+    
+    for proxy in working_proxies:
+        warning = get_warning_emoji(
+            proxy['ip_info']['isp'] if proxy['ip_info'] else "",
+            proxy['ip_info']['asn'] if proxy['ip_info'] else ""
+        )
+        
+        results_text += f"📍 `{proxy['ip']}:{proxy['port']}`\n"
+        
+        if proxy['ip_info']:
+            results_text += f"🆔 ASN: {proxy['ip_info']['asn']} {warning}\n"
+            results_text += f"🌐 ISP: {proxy['ip_info']['isp']}\n"
+            results_text += f"🇺🇸 الدولة: {proxy['ip_info']['country']}\n"
+        
+        results_text += f"⚡ HTTP: {'✅' if proxy['http'] else '❌'} ({proxy['http_speed']}ms)\n"
+        results_text += f"🔌 CONNECT: {'✅' if proxy['connect'] else '❌'} ({proxy['connect_speed']}ms)\n"
+        results_text += "─" * 30 + "\n"
+    
+    # إرسال النتائج مع الأزرار
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(InlineKeyboardButton("🔙 العودة للرئيسية", callback_data="main_menu"))
+    
+    bot.send_message(
+        chat_id,
+        results_text,
+        reply_markup=keyboard,
+        parse_mode='Markdown'
+    )
+
+# التشغيل الرئيسي
 if __name__ == "__main__":
-    print("🚀 بدء تشغيل البوت الذكي للبروكسيات...")
-    bot.remove_webhook()
-    time.sleep(1)
+    print("🟢 بدء تشغيل بوت فحص البروكسيات...")
+    print("⚡ السرعة: 150ms")
+    print("🔍 جاهز لاستقبال الطلبات...")
     bot.infinity_polling()
